@@ -6,6 +6,7 @@ import json
 import html
 import gzip
 import time
+import glob
 import pickle
 import shutil
 import zipfile
@@ -32,7 +33,7 @@ class Core:
         self.configPath = Path('WTF/CurseBreaker.json')
         self.cachePath = Path('WTF/CurseBreaker.cache')
         self.clientType = 'wow_retail'
-        self.waCompanionVersion = 110
+        self.wagoCompanionVersion = 111
         self.config = None
         self.cfIDs = None
         self.cfDirs = None
@@ -46,7 +47,10 @@ class Core:
             shutil.move('CurseBreaker.json', 'WTF')
         if os.path.isfile(self.configPath):
             with open(self.configPath, 'r') as f:
-                self.config = json.load(f)
+                try:
+                    self.config = json.load(f)
+                except (StopIteration, json.JSONDecodeError):
+                    raise RuntimeError
         else:
             self.config = {'Addons': [],
                            'IgnoreClientVersion': {},
@@ -57,7 +61,8 @@ class Core:
                            'WAAccountName': '',
                            'WAAPIKey': '',
                            'WACompanionVersion': 0,
-                           'CFCacheTimestamp': 0}
+                           'CFCacheTimestamp': 0,
+                           'CompactMode': False}
             self.save_config()
         if not os.path.isdir('WTF-Backup') and self.config['Backup']['Enabled']:
             os.mkdir('WTF-Backup')
@@ -101,7 +106,8 @@ class Core:
                         ['2.2.0', 'WACompanionVersion', 0],
                         ['2.8.0', 'IgnoreClientVersion', {}],
                         ['3.0.1', 'CFCacheTimestamp', 0],
-                        ['3.1.10', 'CFCacheCloudFlare', {}]]:
+                        ['3.1.10', 'CFCacheCloudFlare', {}],
+                        ['3.7.0', 'CompactMode', False]]:
                 if add[1] not in self.config.keys():
                     self.config[add[1]] = add[2]
             for delete in [['1.3.0', 'URLCache'],
@@ -130,6 +136,15 @@ class Core:
                 return 0
         else:
             return 0
+
+    def check_if_blocked(self, addon):
+        if addon:
+            if 'Block' in addon.keys():
+                return True
+            else:
+                return False
+        else:
+            return False
 
     def check_if_dev_global(self):
         for addon in self.config['Addons']:
@@ -161,7 +176,7 @@ class Core:
                 raise RuntimeError('ElvUI and Tukui cannot be installed this way.')
             return TukuiAddon(url, True)
         elif url.startswith('https://github.com/'):
-            return GitHubAddon(url)
+            return GitHubAddon(url, self.clientType)
         elif url.lower() == 'elvui':
             if self.clientType == 'wow_retail':
                 return GitLabAddon('ElvUI', '60', 'elvui/elvui', 'master')
@@ -172,6 +187,9 @@ class Core:
                 return GitLabAddon('ElvUI', '60', 'elvui/elvui', 'development')
             else:
                 return GitLabAddon('ElvUI', '492', 'elvui/elvui-classic', 'development')
+        # TODO Remove after 9.0 release
+        elif url.lower() == 'elvui:beta':
+            return GitLabAddon('ElvUI', '60', 'elvui/elvui', 'beta')
         elif url.lower() == 'tukui':
             if self.clientType == 'wow_retail':
                 return GitLabAddon('Tukui', '77', 'Tukz/Tukui', 'master')
@@ -184,6 +202,22 @@ class Core:
                 raise RuntimeError('Incorrect client version.')
         else:
             raise NotImplementedError('Provided URL is not supported.')
+
+    def parse_url_source(self, url):
+        if url.startswith('https://www.curseforge.com/wow/addons/'):
+            return 'CF'
+        elif url.startswith('https://www.wowinterface.com/downloads/'):
+            return 'WoWI'
+        elif url.startswith('https://www.tukui.org/addons.php?id=') or \
+                url.startswith('https://www.tukui.org/classic-addons.php?id=') or \
+                url.lower().startswith('elvui') or \
+                url.lower().startswith('tukui') or \
+                url.lower() == 'sle:dev':
+            return 'Tukui'
+        elif url.startswith('https://github.com/'):
+            return 'GitHub'
+        else:
+            return '?'
 
     def add_addon(self, url, ignore):
         if 'twitch://' in url:
@@ -224,10 +258,11 @@ class Core:
             return True, new.name, new.currentVersion
         return False, addon['Name'], addon['Version']
 
-    def del_addon(self, url):
+    def del_addon(self, url, keep):
         old = self.check_if_installed(url)
         if old:
-            self.cleanup(old['Directories'])
+            if not keep:
+                self.cleanup(old['Directories'])
             self.config['IgnoreClientVersion'].pop(old['URL'], None)
             self.config['Addons'][:] = [d for d in self.config['Addons'] if d.get('URL') != url
                                         and d.get('Name') != url]
@@ -244,7 +279,8 @@ class Core:
                 modified = self.checksumCache[old['URL']]
             else:
                 modified = self.check_checksum(old, False)
-            if force or (new.currentVersion != old['Version'] and update and not modified):
+            blocked = self.check_if_blocked(old)
+            if force or (new.currentVersion != old['Version'] and update and not modified and not blocked):
                 new.get_addon()
                 self.cleanup(old['Directories'])
                 new.install(self.path)
@@ -256,8 +292,11 @@ class Core:
                 old['Directories'] = new.directories
                 old['Checksums'] = checksums
                 self.save_config()
-            return new.name, new.currentVersion, oldversion, modified if not force else False
-        return url, False, False, False
+            if force:
+                modified = False
+                blocked = False
+            return new.name, new.currentVersion, oldversion, modified, blocked, self.parse_url_source(old['URL'])
+        return url, False, False, False, False, self.parse_url_source(url)
 
     def check_checksum(self, addon, bulk=True):
         checksums = {}
@@ -313,6 +352,23 @@ class Core:
                     return -1
             return None
 
+    def block_toggle(self, url):
+        addon = self.check_if_installed(url)
+        if addon:
+            state = self.check_if_blocked(addon)
+            if state:
+                addon.pop('Block', None)
+            else:
+                addon['Block'] = True
+            self.save_config()
+            return not state
+        return None
+
+    def compact_mode_toggle(self):
+        self.config['CompactMode'] = not self.config['CompactMode']
+        self.save_config()
+        return self.config['CompactMode']
+
     def backup_toggle(self):
         self.config['Backup']['Enabled'] = not self.config['Backup']['Enabled']
         self.save_config()
@@ -321,10 +377,9 @@ class Core:
     def backup_check(self):
         if self.config['Backup']['Enabled']:
             if not os.path.isfile(Path('WTF-Backup', f'{datetime.datetime.now().strftime("%d%m%y")}.zip')):
-                listofbackups = os.listdir('WTF-Backup')
-                fullpath = [Path('WTF-Backup', x) for x in listofbackups]
-                if len([name for name in listofbackups]) == self.config['Backup']['Number']:
-                    oldest_file = min(fullpath, key=os.path.getctime)
+                listofbackups = [Path(x) for x in glob.glob('WTF-Backup/*.zip')]
+                if len(listofbackups) == self.config['Backup']['Number']:
+                    oldest_file = min(listofbackups, key=os.path.getctime)
                     os.remove(oldest_file)
                 return True
             else:
@@ -336,17 +391,15 @@ class Core:
         zipf = zipfile.ZipFile(Path('WTF-Backup', f'{datetime.datetime.now().strftime("%d%m%y")}.zip'), 'w',
                                zipfile.ZIP_DEFLATED)
         filecount = 0
-        for root, dirs, files in os.walk('WTF/', topdown=True):
+        for _, _, files in os.walk('WTF/', topdown=True):
             files = [f for f in files if not f[0] == '.']
-            dirs[:] = [d for d in dirs if not d[0] == '.']
             filecount += len(files)
         with Progress('{task.completed}/{task.total}', '|', BarColumn(bar_width=None), '|', auto_refresh=False,
                       console=console) as progress:
             task = progress.add_task('', total=filecount)
             while not progress.finished:
-                for root, dirs, files in os.walk('WTF/', topdown=True):
+                for root, _, files in os.walk('WTF/', topdown=True):
                     files = [f for f in files if not f[0] == '.']
-                    dirs[:] = [d for d in dirs if not d[0] == '.']
                     for f in files:
                         zipf.write(Path(root, f))
                         progress.update(task, advance=1, refresh=True)
@@ -397,7 +450,7 @@ class Core:
                           + os.path.abspath(sys.executable).replace('\\', '\\\\') + '\\" \\"%1\\""')
 
     @retry()
-    def parse_cf_id(self, url):
+    def parse_cf_id(self, url, bulk=False):
         if not self.cfIDs:
             # noinspection PyBroadException
             try:
@@ -423,8 +476,11 @@ class Core:
                     payload = self.scraper.get(f'https://www.curseforge.com{renamecheck.headers["location"]}'
                                                f'/download-client')
                 if payload.status_code == 404:
-                    raise RuntimeError(slug + '\nThe project could be removed from CurseForge or renamed. Uninstall it '
-                                              '(and reinstall if it still exists) to fix this issue.')
+                    if bulk:
+                        return 0
+                    else:
+                        raise RuntimeError(f'{slug}\nThe project could be removed from CurseForge or renamed. Uninstall'
+                                           f' it (and reinstall if it still exists) to fix this issue.')
             xml = parseString(payload.text)
             project = xml.childNodes[0].getElementsByTagName('project')[0].getAttribute('id')
             self.config['CFCacheCloudFlare'][slug] = project
@@ -446,7 +502,7 @@ class Core:
         ids_wowi = []
         for addon in addons:
             if addon['URL'].startswith('https://www.curseforge.com/wow/addons/'):
-                ids_cf.append(int(self.parse_cf_id(addon['URL'])))
+                ids_cf.append(int(self.parse_cf_id(addon['URL'], True)))
             elif addon['URL'].startswith('https://www.wowinterface.com/downloads/'):
                 ids_wowi.append(re.findall(r'\d+', addon['URL'])[0].strip())
         if len(ids_cf) > 0:
@@ -464,7 +520,8 @@ class Core:
             accounts = os.listdir(Path('WTF/Account'))
             accounts_processed = []
             for account in accounts:
-                if os.path.isfile(Path(f'WTF/Account/{account}/SavedVariables/WeakAuras.lua')):
+                if os.path.isfile(Path(f'WTF/Account/{account}/SavedVariables/WeakAuras.lua')) or \
+                        os.path.isfile(Path(f'WTF/Account/{account}/SavedVariables/Plater.lua')):
                     accounts_processed.append(account)
             return accounts_processed
         else:
