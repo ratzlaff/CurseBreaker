@@ -1,0 +1,28 @@
+#!/bin/bash
+
+SCRIPT_HERE=$(dirname $0)
+pushd "${SCRIPT_HERE}" > /dev/null
+    SCRIPT_HERE=$(pwd -P)
+popd > /dev/null
+
+echo "SCRIPT_HERE: ${SCRIPT_HERE}"
+
+pushd "/cygdrive/c/Program Files (x86)/World of Warcraft/_retail_"
+git fetch origin
+[[ $? -ne 0 ]] && echo "ERROR with 'git fetch origin', exiting..." && exit 1
+git merge --ff-only origin/master
+mergedOkay=$?
+if [[ $mergedOkay -ne 0 ]]; then
+    echo "WARNING: Merge did not happen cleanly"
+else
+    git add -A WTF
+    git commit -m "WTF update pre-CurseBreaker" -- WTF
+    git push origin
+fi
+
+python3 "${SCRIPT_HERE}/CurseBreaker.py"
+
+if [[ $mergedOkay -eq 0 ]]; then
+    git add -A WTF Interface
+    git commit -m "CurseBreaker update" -- Interface WTF
+fi
