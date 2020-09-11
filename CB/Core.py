@@ -49,7 +49,7 @@ class Core:
             with open(self.configPath, 'r') as f:
                 try:
                     self.config = json.load(f)
-                except (StopIteration, json.JSONDecodeError):
+                except (StopIteration, UnicodeDecodeError, json.JSONDecodeError):
                     raise RuntimeError
         else:
             self.config = {'Addons': [],
@@ -74,7 +74,8 @@ class Core:
 
     def update_config(self):
         if 'Version' not in self.config.keys() or self.config['Version'] != __version__:
-            urlupdate = {'elvui-classic': 'elvui', 'elvui-classic:dev': 'elvui:dev', 'tukui-classic': 'tukui'}
+            urlupdate = {'elvui-classic': 'elvui', 'elvui-classic:dev': 'elvui:dev', 'tukui-classic': 'tukui',
+                         'sle:dev': 'shadow&light:dev'}
             for addon in self.config['Addons']:
                 # 1.1.0
                 if 'Checksums' not in addon.keys():
@@ -85,7 +86,7 @@ class Core:
                 # 1.1.1
                 if addon['Version'] is None:
                     addon['Version'] = '1'
-                # 2.2.0
+                # 2.2.0, 3.9.4
                 if addon['URL'].lower() in urlupdate:
                     addon['URL'] = urlupdate[addon['URL'].lower()]
                 # 2.4.0
@@ -160,7 +161,7 @@ class Core:
 
     def parse_url(self, url):
         if url.startswith('https://www.curseforge.com/wow/addons/'):
-            return CurseForgeAddon(self.parse_cf_id(url), self.cfCache,
+            return CurseForgeAddon(url, self.parse_cf_id(url), self.cfCache,
                                    'wow' if url in self.config['IgnoreClientVersion'].keys() else self.clientType,
                                    self.check_if_dev(url))
         elif url.startswith('https://www.wowinterface.com/downloads/'):
@@ -195,7 +196,7 @@ class Core:
                 return GitLabAddon('Tukui', '77', 'Tukz/Tukui', 'master')
             else:
                 return GitLabAddon('Tukui', '77', 'Tukz/Tukui', 'Classic')
-        elif url.lower() == 'sle:dev':
+        elif url.lower() == 'shadow&light:dev':
             if self.clientType == 'wow_retail':
                 return GitLabAddon('ElvUI Shadow & Light', '45', 'shadow-and-light/shadow-and-light', 'dev')
             else:
@@ -312,15 +313,14 @@ class Core:
         self.checksumCache[result[0]] = result[1]
 
     def bulk_check_checksum(self, addons, pbar):
-        pool = Pool()
-        workers = []
-        for addon in addons:
-            w = pool.apply_async(self.check_checksum, (addon, ), callback=self.bulk_check_checksum_callback)
-            workers.append(w)
-        for w in workers:
-            w.wait()
-            # TODO Handle progress monitoring better
-            pbar.update(0, advance=0.5, refresh=True)
+        with Pool() as pool:
+            workers = []
+            for addon in addons:
+                w = pool.apply_async(self.check_checksum, (addon, ), callback=self.bulk_check_checksum_callback)
+                workers.append(w)
+            for w in workers:
+                w.wait()
+                pbar.update(0, advance=0.5, refresh=True)
 
     def dev_toggle(self, url):
         if url == 'global':
@@ -391,14 +391,14 @@ class Core:
         zipf = zipfile.ZipFile(Path('WTF-Backup', f'{datetime.datetime.now().strftime("%d%m%y")}.zip'), 'w',
                                zipfile.ZIP_DEFLATED)
         filecount = 0
-        for _, _, files in os.walk('WTF/', topdown=True):
+        for _, _, files in os.walk('WTF/', topdown=True, followlinks=True):
             files = [f for f in files if not f[0] == '.']
             filecount += len(files)
         with Progress('{task.completed}/{task.total}', '|', BarColumn(bar_width=None), '|', auto_refresh=False,
                       console=console) as progress:
             task = progress.add_task('', total=filecount)
             while not progress.finished:
-                for root, _, files in os.walk('WTF/', topdown=True):
+                for root, _, files in os.walk('WTF/', topdown=True, followlinks=True):
                     files = [f for f in files if not f[0] == '.']
                     for f in files:
                         zipf.write(Path(root, f))
@@ -422,10 +422,10 @@ class Core:
                 elif directory not in ignored:
                     orphanedaddon.append(directory)
         directories += directoriesgit + orphanedaddon
-        for root, dirs, files in os.walk('WTF/'):
+        for root, dirs, files in os.walk('WTF/', followlinks=True):
             for f in files:
                 if 'Blizzard_' not in f and f.endswith('.lua'):
-                    name = f.split('.')[0]
+                    name = os.path.splitext(f)[0]
                     if name not in directories:
                         orphaneconfig.append(str(Path(root, f))[4:])
         return orphanedaddon, orphaneconfig
