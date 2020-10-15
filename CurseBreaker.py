@@ -25,15 +25,21 @@ from rich.progress import Progress, BarColumn
 from rich.traceback import Traceback, install
 from multiprocessing import freeze_support
 from prompt_toolkit import PromptSession, HTML
+from prompt_toolkit.shortcuts import confirm
 from prompt_toolkit.completion import WordCompleter, NestedCompleter
 from distutils.version import StrictVersion
 from CB import HEADERS, HEADLESS_TERMINAL_THEME, __version__
-from CB.Core import Core
+from CB.Core import Core, DependenciesParser
 from CB.Compat import pause, timeout, clear, set_terminal_title, set_terminal_size, getch, kbhit
 from CB.Wago import WagoUpdater
 
 if platform.system() == 'Windows':
     from ctypes import windll, wintypes
+
+# FIXME - Python bug #39010 - Fixed in 3.8.6/3.9
+import asyncio
+import selectors
+asyncio.set_event_loop(asyncio.SelectorEventLoop(selectors.SelectSelector()))
 
 
 class TUI:
@@ -45,6 +51,7 @@ class TUI:
         self.table = None
         self.cfSlugs = None
         self.wowiSlugs = None
+        self.tipsDatabase = None
         self.completer = None
         self.os = platform.system()
         install()
@@ -119,7 +126,7 @@ class TUI:
                 self.console.print('Command not found.')
                 sys.exit(0)
         # Addons auto update
-        if len(self.core.config['Addons']) > 0:
+        if len(self.core.config['Addons']) > 0 and self.core.config['AutoUpdate']:
             if not self.headless:
                 self.console.print('Automatic update of all addons will start in 5 seconds.\n'
                                    'Press any button to enter interactive mode.', highlight=False)
@@ -161,6 +168,7 @@ class TUI:
                            'tion.\n')
         if len(self.core.config['Addons']) == 0:
             self.console.print('Command [green]import[/green] might be used to detect already installed addons.\n')
+        self.motd_parser()
         # Prompt session
         while True:
             try:
@@ -190,7 +198,7 @@ class TUI:
                     except PermissionError:
                         pass
                 payload = requests.get('https://api.github.com/repos/AcidWeb/CurseBreaker/releases/latest',
-                                       headers=HEADERS).json()
+                                       headers=HEADERS, timeout=5).json()
                 if 'name' in payload and 'body' in payload and 'assets' in payload:
                     remoteversion = payload['name']
                     changelog = payload['body']
@@ -204,9 +212,10 @@ class TUI:
                     if url and StrictVersion(remoteversion[1:]) > StrictVersion(__version__):
                         self.console.print('[green]Updating CurseBreaker...[/green]')
                         shutil.move(sys.executable, sys.executable + '.old')
-                        payload = requests.get(url, headers=HEADERS)
+                        payload = requests.get(url, headers=HEADERS, timeout=5)
                         if self.os == 'Darwin':
-                            zipfile.ZipFile(io.BytesIO(payload.content)).extractall()
+                            zipfile.ZipFile(io.BytesIO(payload.content)).extractall(path=os.path.dirname(
+                                os.path.abspath(sys.executable)))
                         else:
                             with open(sys.executable, 'wb') as f:
                                 if self.os == 'Windows':
@@ -227,7 +236,7 @@ class TUI:
                 sys.exit(1)
 
     def motd_parser(self):
-        payload = requests.get('https://storage.googleapis.com/cursebreaker/motd', headers=HEADERS)
+        payload = requests.get('https://storage.googleapis.com/cursebreaker/motd', headers=HEADERS, timeout=5)
         if payload.status_code == 200:
             self.console.print(Panel(payload.content.decode('UTF-8'), title='MOTD', border_style='red'))
             self.console.print('')
@@ -235,14 +244,18 @@ class TUI:
     def handle_exception(self, e, table=True):
         if self.table.row_count > 1 and table:
             self.console.print(self.table)
-        if getattr(sys, 'frozen', False):
+        if getattr(sys, 'frozen', False) and 'CURSEBREAKER_DEBUG' not in os.environ:
             sys.tracebacklimit = 0
+            width = 0
+        else:
+            width = 100
         if isinstance(e, list):
             for es in e:
                 self.console.print(Traceback.from_exception(exc_type=es.__class__, exc_value=es,
-                                                            traceback=es.__traceback__))
+                                                            traceback=es.__traceback__, width=width))
         else:
-            self.console.print(Traceback.from_exception(exc_type=e.__class__, exc_value=e, traceback=e.__traceback__))
+            self.console.print(Traceback.from_exception(exc_type=e.__class__, exc_value=e,
+                                                        traceback=e.__traceback__, width=width))
 
     def print_header(self):
         clear()
@@ -266,7 +279,7 @@ class TUI:
                 window = windll.kernel32.GetConsoleWindow()
                 if window:
                     windll.user32.ShowWindow(window, 0)
-        elif 'WINDIR' in os.environ and 'WT_SESSION' not in os.environ:
+        elif 'WINDIR' in os.environ and 'WT_SESSION' not in os.environ and 'ALACRITTY_LOG' not in os.environ:
             set_terminal_size(100, 50)
             if platform.system() == 'Windows':
                 windll.kernel32.SetConsoleScreenBufferSize(windll.kernel32.GetStdHandle(-11), wintypes._COORD(100, 200))
@@ -283,16 +296,16 @@ class TUI:
             try:
                 self.cfSlugs = pickle.load(gzip.open(io.BytesIO(
                     requests.get('https://storage.googleapis.com/cursebreaker/cfslugs.pickle.gz',
-                                 headers=HEADERS).content)))
+                                 headers=HEADERS, timeout=5).content)))
                 self.wowiSlugs = pickle.load(gzip.open(io.BytesIO(
                     requests.get('https://storage.googleapis.com/cursebreaker/wowislugs.pickle.gz',
-                                 headers=HEADERS).content)))
+                                 headers=HEADERS, timeout=5).content)))
             except Exception:
                 self.cfSlugs = []
                 self.wowiSlugs = []
         addons = []
         for addon in sorted(self.core.config['Addons'], key=lambda k: k['Name'].lower()):
-            addons.append(f'"{addon["Name"]}"' if ',' in addon["Name"] else addon["Name"])
+            addons.append(addon['Name'])
         slugs = ['ElvUI', 'Tukui']
         for item in self.cfSlugs:
             slugs.append(f'cf:{item}')
@@ -311,15 +324,18 @@ class TUI:
             'status': WordCompleter(addons, ignore_case=True),
             'orphans': None,
             'search': None,
+            'recommendations': None,
             'import': {'install': None},
             'export': None,
-            'toggle_backup': None,
-            'toggle_dev': WordCompleter(addons + ['global'], ignore_case=True, sentence=True),
-            'toggle_block': WordCompleter(addons, ignore_case=True, sentence=True),
-            'toggle_compact_mode': None,
-            'toggle_wago': None,
-            'set_wago_api': None,
-            'set_wago_wow_account': WordCompleter(accounts, ignore_case=True, sentence=True),
+            'toggle': {'authors': None,
+                       'autoupdate': None,
+                       'backup': None,
+                       'channel': WordCompleter(addons + ['global'], ignore_case=True, sentence=True),
+                       'compact_mode': None,
+                       'pinning': WordCompleter(addons, ignore_case=True, sentence=True),
+                       'wago': None},
+            'set': {'wago_api': None,
+                    'wago_wow_account': WordCompleter(accounts, ignore_case=True, sentence=True)},
             'uri_integration': None,
             'help': None,
             'exit': None
@@ -328,41 +344,67 @@ class TUI:
     def setup_table(self):
         self.table = Table(box=box.SQUARE)
         self.table.add_column('Status', header_style='bold white', no_wrap=True, justify='center')
-        self.table.add_column('Name', header_style='bold white')
+        self.table.add_column('Name / Author' if self.core.config['ShowAuthors'] else 'Name', header_style='bold white')
         self.table.add_column('Version', header_style='bold white')
 
     def parse_args(self, args):
         parsed = []
         for addon in sorted(self.core.config['Addons'], key=lambda k: len(k['Name']), reverse=True):
-            name = f'"{addon["Name"]}"' if ',' in addon['Name'] else addon['Name']
-            if name in args or addon['URL'] in args:
-                parsed.append(name)
-                args = args.replace(name, '', 1)
+            if addon['Name'] in args or addon['URL'] in args:
+                parsed.append(addon['Name'])
+                args = args.replace(addon['Name'], '', 1)
         return sorted(parsed)
 
-    def c_install(self, args):
+    def parse_link(self, text, link, dev=None, authors=None):
+        if dev == 1:
+            dev = ' [bold][B][/bold]'
+        elif dev == 2:
+            dev = ' [bold][A][/bold]'
+        else:
+            dev = ''
+        if authors and self.core.config['ShowAuthors']:
+            authors.sort()
+            authors = f' [bold black]by {", ".join(authors)}[/bold black]'
+        else:
+            authors = ''
+        if link:
+            obj = Text.from_markup(f'[link={link}]{text}[/link]{dev}{authors}')
+        else:
+            obj = Text.from_markup(f'{text}{dev}{authors}')
+        obj.no_wrap = True
+        return obj
+
+    def c_install(self, args, recursion=False):
         if args:
             if args.startswith('-i '):
                 args = args[3:]
                 optignore = True
             else:
                 optignore = False
-            args = re.sub(r'(\w)([ ]+)(\w)', r'\1,\3', args)
+            dependencies = DependenciesParser(self.core)
+            args = re.sub(r'([a-zA-Z0-9_:])([ ]+)([a-zA-Z0-9_:])', r'\1,\3', args)
             addons = [addon.strip() for addon in list(reader([args], skipinitialspace=True))[0]]
             with Progress('{task.completed}/{task.total}', '|', BarColumn(bar_width=None), '|',
                           auto_refresh=False, console=self.console) as progress:
                 task = progress.add_task('', total=len(addons))
                 while not progress.finished:
                     for addon in addons:
-                        installed, name, version = self.core.add_addon(addon, optignore)
+                        installed, name, version, deps = self.core.add_addon(addon, optignore)
                         if installed:
                             self.table.add_row('[green]Installed[/green]', Text(name, no_wrap=True),
                                                Text(version, no_wrap=True))
+                            if not recursion:
+                                dependencies.add_dependency(deps)
                         else:
                             self.table.add_row('[bold black]Already installed[/bold black]',
                                                Text(name, no_wrap=True), Text(version, no_wrap=True))
                         progress.update(task, advance=1, refresh=True)
             self.console.print(self.table)
+            dependencies = dependencies.parse_dependency()
+            if dependencies:
+                self.setup_table()
+                self.console.print('Installing dependencies:')
+                self.c_install(dependencies, recursion=True)
         else:
             self.console.print('[green]Usage:[/green]\n\tThis command accepts a space-separated list of links as an arg'
                                'ument.[bold white]\n\tFlags:[/bold white]\n\t\t[bold white]-i[/bold white] - Disable th'
@@ -414,6 +456,7 @@ class TUI:
             addons = sorted(self.core.config['Addons'], key=lambda k: k['Name'].lower())
             compacted = 0
         exceptions = []
+        dependencies = DependenciesParser(self.core)
         with Progress('{task.completed:.0f}/{task.total}', '|', BarColumn(bar_width=None), '|',
                       auto_refresh=False, console=None if self.headless else self.console) as progress:
             task = progress.add_task('', total=len(addons))
@@ -423,9 +466,10 @@ class TUI:
             while not progress.finished:
                 for addon in addons:
                     try:
-                        # noinspection PyTypeChecker
-                        name, versionnew, versionold, modified, blocked, source = self.core.\
-                            update_addon(addon if isinstance(addon, str) else addon['URL'], update, force)
+                        name, authors, versionnew, versionold, modified, blocked, source, sourceurl, changelog, deps,\
+                            dstate = self.core.update_addon(addon if isinstance(addon, str) else addon['URL'],
+                                                            update, force)
+                        dependencies.add_dependency(deps)
                         if provider:
                             source = f' [bold white]{source}[/bold white]'
                         else:
@@ -434,30 +478,42 @@ class TUI:
                             if versionold == versionnew:
                                 if modified:
                                     self.table.add_row(f'[bold red]Modified[/bold red]{source}',
-                                                       Text(name, no_wrap=True), Text(versionold, no_wrap=True))
+                                                       self.parse_link(name, sourceurl, authors=authors),
+                                                       self.parse_link(versionold, changelog, dstate))
                                 else:
                                     if self.core.config['CompactMode'] and compacted > -1:
                                         compacted += 1
                                     else:
                                         self.table.add_row(f'[green]Up-to-date[/green]{source}',
-                                                           Text(name, no_wrap=True), Text(versionold, no_wrap=True))
+                                                           self.parse_link(name, sourceurl, authors=authors),
+                                                           self.parse_link(versionold, changelog, dstate))
                             else:
                                 if modified or blocked:
                                     self.table.add_row(f'[bold red]Update suppressed[/bold red]{source}',
-                                                       Text(name, no_wrap=True), Text(versionold, no_wrap=True))
+                                                       self.parse_link(name, sourceurl, authors=authors),
+                                                       self.parse_link(versionold, changelog, dstate))
                                 else:
-                                    self.table.add_row(f'[yellow]{"Updated" if update else "Update available"}'
-                                                       f'[/yellow]{source}', Text(name, no_wrap=True),
-                                                       Text(versionnew, style='yellow', no_wrap=True))
+                                    version = self.parse_link(versionnew, changelog, dstate)
+                                    version.stylize('yellow')
+                                    self.table.add_row(
+                                        f'[yellow]{"Updated" if update else "Update available"}[/yellow]{source}',
+                                        self.parse_link(name, sourceurl, authors=authors),
+                                        version)
                         else:
                             self.table.add_row(f'[bold black]Not installed[/bold black]{source}',
-                                               Text(addon, no_wrap=True), Text('', no_wrap=True))
+                                               Text(addon, no_wrap=True),
+                                               Text('', no_wrap=True))
                     except Exception as e:
                         exceptions.append(e)
                     progress.update(task, advance=1 if args else 0.5, refresh=True)
         if addline:
             self.console.print('')
         self.console.print(self.table)
+        dependencies = dependencies.parse_dependency()
+        if dependencies and update:
+            self.setup_table()
+            self.console.print('Installing dependencies:')
+            self.c_install(dependencies, recursion=True)
         if compacted > 0:
             self.console.print(f'Additionally [green]{compacted}[/green] addons are up-to-date.')
         if len(addons) == 0:
@@ -470,8 +526,11 @@ class TUI:
         if args:
             self.c_update(args, False, True, True)
         else:
-            self.console.print('[green]Usage:[/green]\n\tThis command accepts a space-separated list of addon names or '
-                               'full links as an argument.')
+            # noinspection PyTypeChecker
+            answer = confirm(HTML('<ansibrightred>Execute a forced update of all addons and overwrite ALL local '
+                                  'changes?</ansibrightred>'))
+            if answer:
+                self.c_update(False, False, True, True)
 
     def c_status(self, args):
         if args and args.startswith('-s'):
@@ -502,92 +561,109 @@ class TUI:
         else:
             self.console.print('This feature is available only on Windows.')
 
-    def c_toggle_dev(self, args):
-        if args:
-            status = self.core.dev_toggle(args)
-            if status is None:
-                self.console.print('[bold red]This addon doesn\'t exist or it is not installed yet.[/bold red]')
-            elif status == -1:
-                self.console.print('[bold red]This feature can be only used with CurseForge addons.[/bold red]')
-            elif status == 0:
-                self.console.print('All CurseForge addons are now switched' if args == 'global' else 'Addon switched',
-                                   'to the [yellow]beta[/yellow] channel.')
-            elif status == 1:
-                self.console.print('All CurseForge addons are now switched' if args == 'global' else 'Addon switched',
-                                   'to the [red]alpha[/red] channel.')
-            elif status == 2:
-                self.console.print('All CurseForge addons are now switched' if args == 'global' else 'Addon switched',
-                                   'to the [green]stable[/green] channel.')
-        else:
-            self.console.print('[green]Usage:[/green]\n\tThis command accepts an addon name (or "global") as an'
-                               ' argument.', highlight=False)
-
-    def c_toggle_block(self, args):
-        if args:
-            status = self.core.block_toggle(args)
-            if status is None:
-                self.console.print('[bold red]This addon does not exist or it is not installed yet.[/bold red]')
-            elif status:
-                self.console.print('Updates for this addon are now [red]suppressed[/red].')
+    def c_toggle(self, args):
+        args = args.strip()
+        if args.startswith('channel'):
+            args = args[8:]
+            if args:
+                status = self.core.dev_toggle(args)
+                if status is None:
+                    self.console.print('[bold red]This addon doesn\'t exist or it is not installed yet.[/bold red]')
+                elif status == -1:
+                    self.console.print('[bold red]This feature can be only used with CurseForge addons.[/bold red]')
+                elif status == 0:
+                    self.console.print(
+                        'All CurseForge addons are now switched' if args == 'global' else 'Addon switched',
+                        'to the [yellow]beta[/yellow] channel.')
+                elif status == 1:
+                    self.console.print(
+                        'All CurseForge addons are now switched' if args == 'global' else 'Addon switched',
+                        'to the [red]alpha[/red] channel.')
+                elif status == 2:
+                    self.console.print(
+                        'All CurseForge addons are now switched' if args == 'global' else 'Addon switched',
+                        'to the [green]stable[/green] channel.')
             else:
-                self.console.print('Updates for this addon are [green]no longer suppressed[/green].')
-        else:
-            self.console.print('[green]Usage:[/green]\n\tThis command accepts an addon name as an argument.')
-
-    def c_toggle_backup(self, _):
-        status = self.core.backup_toggle()
-        self.console.print('Backup of WTF directory is now:',
-                           '[green]ENABLED[/green]' if status else '[red]DISABLED[/red]')
-
-    def c_toggle_compact_mode(self, _):
-        status = self.core.compact_mode_toggle()
-        self.console.print('Table compact mode is now:',
-                           '[green]ENABLED[/green]' if status else '[red]DISABLED[/red]')
-
-    def c_toggle_wago(self, args):
-        if args:
-            if args == self.core.config['WAUsername']:
-                self.console.print(f'Wago version check is now: [green]ENABLED[/green]\nEntries created by '
-                                   f'[bold white]{self.core.config["WAUsername"]}[/bold white] are now included.')
-                self.core.config['WAUsername'] = ''
+                self.console.print('[green]Usage:[/green]\n\tThis command accepts an addon name (or "global") as an'
+                                   ' argument.', highlight=False)
+        elif args.startswith('pinning'):
+            args = args[8:]
+            if args:
+                status = self.core.block_toggle(args)
+                if status is None:
+                    self.console.print('[bold red]This addon does not exist or it is not installed yet.[/bold red]')
+                elif status:
+                    self.console.print('Updates for this addon are now [red]suppressed[/red].')
+                else:
+                    self.console.print('Updates for this addon are [green]no longer suppressed[/green].')
             else:
-                self.core.config['WAUsername'] = args.strip()
-                self.console.print(f'Wago version check is now: [green]ENABLED[/green]\nEntries created by '
-                                   f'[bold white]{self.core.config["WAUsername"]}[/bold white] are now ignored.')
-        else:
-            if self.core.config['WAUsername'] == 'DISABLED':
-                self.core.config['WAUsername'] = ''
-                self.console.print('Wago version check is now: [green]ENABLED[/green]')
+                self.console.print('[green]Usage:[/green]\n\tThis command accepts an addon name as an argument.')
+        elif args.startswith('wago'):
+            args = args[5:]
+            if args:
+                if args == self.core.config['WAUsername']:
+                    self.console.print(f'Wago version check is now: [green]ENABLED[/green]\nEntries created by '
+                                       f'[bold white]{self.core.config["WAUsername"]}[/bold white] are now included.')
+                    self.core.config['WAUsername'] = ''
+                else:
+                    self.core.config['WAUsername'] = args.strip()
+                    self.console.print(f'Wago version check is now: [green]ENABLED[/green]\nEntries created by '
+                                       f'[bold white]{self.core.config["WAUsername"]}[/bold white] are now ignored.')
             else:
-                self.core.config['WAUsername'] = 'DISABLED'
-                shutil.rmtree(Path('Interface/AddOns/WeakAurasCompanion'), ignore_errors=True)
-                self.console.print('Wago version check is now: [red]DISABLED[/red]')
-        self.core.save_config()
-
-    def c_set_wago_api(self, args):
-        if args:
-            self.console.print('Wago API key is now set.')
-            self.core.config['WAAPIKey'] = args.strip()
+                if self.core.config['WAUsername'] == 'DISABLED':
+                    self.core.config['WAUsername'] = ''
+                    self.console.print('Wago version check is now: [green]ENABLED[/green]')
+                else:
+                    self.core.config['WAUsername'] = 'DISABLED'
+                    shutil.rmtree(Path('Interface/AddOns/WeakAurasCompanion'), ignore_errors=True)
+                    self.console.print('Wago version check is now: [red]DISABLED[/red]')
             self.core.save_config()
-        elif self.core.config['WAAPIKey'] != '':
-            self.console.print('Wago API key is now removed.')
-            self.core.config['WAAPIKey'] = ''
-            self.core.save_config()
-        else:
-            self.console.print('[green]Usage:[/green]\n\tThis command accepts API key as an argument.')
+        elif args.startswith('authors'):
+            status = self.core.generic_toggle('ShowAuthors')
+            self.console.print('The authors listing is on now:',
+                               '[green]ENABLED[/green]' if status else '[red]DISABLED[/red]')
+        elif args.startswith('autoupdate'):
+            status = self.core.generic_toggle('AutoUpdate')
+            self.console.print('The automatic addon update on startup is now:',
+                               '[green]ENABLED[/green]' if status else '[red]DISABLED[/red]')
+        elif args.startswith('backup'):
+            status = self.core.generic_toggle('Backup', 'Enabled')
+            self.console.print('Backup of WTF directory is now:',
+                               '[green]ENABLED[/green]' if status else '[red]DISABLED[/red]')
+        elif args.startswith('compact_mode'):
+            status = self.core.generic_toggle('CompactMode')
+            self.console.print('Table compact mode is now:',
+                               '[green]ENABLED[/green]' if status else '[red]DISABLED[/red]')
 
-    def c_set_wago_wow_account(self, args):
-        if args:
-            args = args.strip()
-            if os.path.isfile(Path(f'WTF/Account/{args}/SavedVariables/WeakAuras.lua')) or \
-                    os.path.isfile(Path(f'WTF/Account/{args}/SavedVariables/Plater.lua')):
-                self.console.print(f'WoW account name set to: [bold white]{args}[/bold white]')
-                self.core.config['WAAccountName'] = args
+    def c_set(self, args):
+        args = args.strip()
+        if args.startswith('wago_api'):
+            args = args[9:]
+            if args:
+                self.console.print('Wago API key is now set.')
+                self.core.config['WAAPIKey'] = args.strip()
+                self.core.save_config()
+            elif self.core.config['WAAPIKey'] != '':
+                self.console.print('Wago API key is now removed.')
+                self.core.config['WAAPIKey'] = ''
                 self.core.save_config()
             else:
-                self.console.print('Incorrect WoW account name.')
+                self.console.print('[green]Usage:[/green]\n\tThis command accepts API key as an argument.')
+        elif args.startswith('wago_wow_account'):
+            args = args[17:]
+            if args:
+                args = args.strip()
+                if os.path.isfile(Path(f'WTF/Account/{args}/SavedVariables/WeakAuras.lua')) or \
+                        os.path.isfile(Path(f'WTF/Account/{args}/SavedVariables/Plater.lua')):
+                    self.console.print(f'WoW account name set to: [bold white]{args}[/bold white]')
+                    self.core.config['WAAccountName'] = args
+                    self.core.save_config()
+                else:
+                    self.console.print('Incorrect WoW account name.')
+            else:
+                self.console.print('[green]Usage:[/green]\n\tThis command accepts the WoW account name as an argument.')
         else:
-            self.console.print('[green]Usage:[/green]\n\tThis command accepts the WoW account name as an argument.')
+            self.console.print('Unknown option.')
 
     def c_wago_update(self, _, verbose=True):
         if os.path.isdir(Path('Interface/AddOns/WeakAuras')) or os.path.isdir(Path('Interface/AddOns/Plater')):
@@ -596,11 +672,11 @@ class TUI:
                 return
             elif len(accounts) > 1 and self.core.config['WAAccountName'] == '':
                 if verbose:
-                    self.console.print('More than one WoW account detected.\nPlease use [bold white]set_wago_wow_accoun'
+                    self.console.print('More than one WoW account detected.\nPlease use [bold white]set wago_wow_accoun'
                                        't[''/bold white] command to set the correct account name.')
                 else:
                     self.console.print('\n[green]More than one WoW account detected.[/green]\nPlease use [bold white]se'
-                                       't_wago_wow_account[/bold white] command to set the correct account name.')
+                                       't wago_wow_account[/bold white] command to set the correct account name.')
                 return
             elif len(accounts) == 1 and self.core.config['WAAccountName'] == '':
                 self.core.config['WAAccountName'] = accounts[0]
@@ -619,19 +695,19 @@ class TUI:
                 if len(statuswa[0]) > 0 or len(statuswa[1]) > 0:
                     self.console.print('[green]Outdated WeakAuras:[/green]')
                     for aura in statuswa[0]:
-                        self.console.print(aura, highlight=False)
+                        self.console.print(f'[link={aura[1]}]{aura[0]}[/link]', highlight=False)
                     self.console.print('\n[green]Detected WeakAuras:[/green]')
                     for aura in statuswa[1]:
-                        self.console.print(aura, highlight=False)
+                        self.console.print(f'[link={aura[1]}]{aura[0]}[/link]', highlight=False)
                 if len(statusplater[0]) > 0 or len(statusplater[1]) > 0:
                     if len(statuswa[0]) != 0 or len(statuswa[1]) != 0:
                         self.console.print('')
                     self.console.print('[green]Outdated Plater profiles/scripts:[/green]')
                     for aura in statusplater[0]:
-                        self.console.print(aura, highlight=False)
+                        self.console.print(f'[link={aura[1]}]{aura[0]}[/link]', highlight=False)
                     self.console.print('\n[green]Detected Plater profiles/scripts:[/green]')
                     for aura in statusplater[1]:
-                        self.console.print(aura, highlight=False)
+                        self.console.print(f'[link={aura[1]}]{aura[0]}[/link]', highlight=False)
             else:
                 if len(statuswa[0]) > 0:
                     self.console.print(f'\n[green]The number of outdated WeakAuras:[/green] '
@@ -648,11 +724,35 @@ class TUI:
             self.console.print('[green]Top results of your search:[/green]')
             for url in results:
                 if self.core.check_if_installed(url):
-                    self.console.print(f'{url} [yellow]\[Installed][/yellow]', highlight=False)
+                    self.console.print(f'[link={url}]{url}[/link] [yellow]\[Installed][/yellow]', highlight=False)
                 else:
-                    self.console.print(url, highlight=False)
+                    self.console.print(f'[link={url}]{url}[/link]', highlight=False)
         else:
             self.console.print('[green]Usage:[/green]\n\tThis command accepts a search query as an argument.')
+
+    def c_recommendations(self, _):
+        if not self.tipsDatabase:
+            # noinspection PyBroadException
+            try:
+                self.tipsDatabase = pickle.load(gzip.open(io.BytesIO(
+                    requests.get('https://storage.googleapis.com/cursebreaker/recommendations.pickle.gz',
+                                 headers=HEADERS, timeout=5).content)))
+            except Exception:
+                self.tipsDatabase = {}
+        if len(self.tipsDatabase) > 0:
+            found = False
+            for tip in self.tipsDatabase:
+                breaker = False
+                for addon, data in tip['Addons'].items():
+                    check = True if self.core.check_if_installed(addon) else False
+                    breaker = check == data['Installed']
+                if breaker:
+                    found = True
+                    recomendation = tip["Recomendation"].replace('|n', '\n')
+                    self.console.print(f'[bold white underline]{tip["Title"]}[/bold white underline] by [green]'
+                                       f'{tip["Author"]}[/green]\n\n{recomendation}\n', highlight=False)
+            if not found:
+                self.console.print('Not found any recommendations for you. Good job!')
 
     def c_import(self, args):
         hit, partial_hit, miss = self.core.detect_addons()
@@ -689,28 +789,35 @@ class TUI:
                            'r full links.\n\tIf no argument is provided all non-modified addons will be updated.\n'
                            '[green]force_update [URL/Name][/green]\n\tCommand accepts a space-separated list of addon n'
                            'ames or full links.\n\tSelected addons will be reinstalled or updated regardless of their c'
-                           'urrent state.\n'
+                           'urrent state.\n\tIf no argument is provided all addons will be forcefully updated.\n'
                            '[green]wago_update[/green]\n\tCommand detects all installed WeakAuras and Plater profiles/s'
                            'cripts.\n\tAnd then generate WeakAuras Companion payload.\n'
                            '[green]status[/green]\n\tPrints the current state of all installed addons.\n\t[bold white]F'
                            'lags:[/bold white]\n\t\t[bold white]-s[/bold white] - Display the source of the addons.\n'
                            '[green]orphans[/green]\n\tPrints list of orphaned directories and files.\n'
                            '[green]search [Keyword][/green]\n\tExecutes addon search on CurseForge.\n'
+                           '[green]recommendations[/green]\n\tCheck the list of currently installed addons against a co'
+                           'mmunity-driven database of tips.\n'
                            '[green]import[/green]\n\tCommand attempts to import already installed addons.\n'
                            '[green]export[/green]\n\tCommand prints list of all installed addons in a form suitable f'
                            'or sharing.\n'
-                           '[green]toggle_backup[/green]\n\tEnables/disables automatic daily backup of WTF directory.\n'
-                           '[green]toggle_dev [Name][/green]\n\tCommand accepts an addon name (or "global") as argument'
-                           '.\n\tPrioritizes alpha/beta versions for the provided addon.\n'
-                           '[green]toggle_block [Name][/green]\n\tCommand accepts an addon name as argument.\n\tBlocks/'
-                           'unblocks updating of the provided addon.\n'
-                           '[green]toggle_compact_mode [/green]\n\tEnables/disables compact table mode that hides entri'
+                           '[green]toggle authors[/green]\n\tEnables/disables the display of addon author names in the '
+                           'table.\n'
+                           '[green]toggle autoupdate[/green]\n\tEnables/disables the automatic addon update on startup'
+                           '.\n'
+                           '[green]toggle backup[/green]\n\tEnables/disables automatic daily backup of WTF directory.\n'
+                           '[green]toggle channel [Name][/green]\n\tCommand accepts an addon name (or "global") as argu'
+                           'ment.\n\tPrioritizes alpha/beta versions for the provided addon.\n'
+                           '[green]toggle compact_mode [/green]\n\tEnables/disables compact table mode that hides entri'
                            'es of up-to-date addons.\n'
-                           '[green]toggle_wago [Username][/green]\n\tEnables/disables automatic Wago updates.\n\tIf a u'
+                           '[green]toggle pinning [Name][/green]\n\tCommand accepts an addon name as argument.\n\tBlock'
+                           's/unblocks updating of the provided addon.\n'
+                           '[green]toggle wago [Username][/green]\n\tEnables/disables automatic Wago updates.\n\tIf a u'
                            'sername is provided check will start to ignore the specified author.\n'
-                           '[green]set_wago_api [API key][/green]\n\tSets Wago API key required to access private entri'
-                           'es.\n\tIt can be procured here: https://wago.io/account\n'
-                           '[green]set_wago_wow_account [Account name][/green]\n\tSets WoW account used by Wago updater'
+                           '[green]set wago_api [API key][/green]\n\tSets Wago API key required to access private entri'
+                           'es.\n\tIt can be procured here:'
+                           ' [link=https://wago.io/account]https://wago.io/account[/link]\n'
+                           '[green]set wago_wow_account [Account name][/green]\n\tSets WoW account used by Wago updater'
                            '.\n\tNeeded only if compatibile addons are used on more than one WoW account.\n'
                            '[green]uri_integration[/green]\n\tEnables integration with CurseForge page.\n\t[i]"Install"'
                            '[/i] button will now start this application.\n'

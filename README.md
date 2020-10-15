@@ -2,9 +2,9 @@
 
 [<img src="https://img.shields.io/github/release/AcidWeb/CurseBreaker">](https://github.com/AcidWeb/CurseBreaker/releases/latest) [<img src="https://img.shields.io/github/downloads/AcidWeb/CurseBreaker/latest/total">](https://github.com/AcidWeb/CurseBreaker/releases/latest) [<img src="https://img.shields.io/github/downloads/AcidWeb/CurseBreaker/total">](https://github.com/AcidWeb/CurseBreaker/releases/latest) [<img src="https://img.shields.io/github/workflow/status/AcidWeb/CurseBreaker/Binary%20builder">](https://github.com/AcidWeb/CurseBreaker/actions) [<img src="https://img.shields.io/discord/362155557488164874?logo=discord">](https://discord.gg/G2SXFGb)
 
-CLI addon updater for World of Warcraft.
+TUI/CLI addon updater for World of Warcraft.
 
-![Screenshot](https://i.imgur.com/s9kOx2R.png)
+![Screenshot](https://i.imgur.com/A3DH1xf.png)
 
 ## DOWNLOAD
 The latest release can be found [here](https://github.com/AcidWeb/CurseBreaker/releases/latest).\
@@ -24,9 +24,9 @@ By default **CurseBreaker** will create backups of entire `WTF` directory.
 - On Windows command `uri_integration` can be used to enable integration with the CurseForge page.
 - Most of the commands support the space-separated list of addons.
 - `install` command have optional `-i` flag that can be used to disable client version check.
-- TUI will look a little better if the application is started by something else than the default Windows command prompt. [Windows Terminal](https://github.com/microsoft/terminal) is recommended.
+- TUI will look a little better if the application is started by something else than the default Windows command prompt. Preview version of [Windows Terminal](https://aka.ms/terminal-preview) is recommended.
 - Environment variable `CURSEBREAKER_PATH` can be used to set the custom location of WoW client.
-- When the application is started with a `headless` parameter entire addon and WA upgrade process plus WTF backup should be executed in the background. Log file _CurseBreaker.html_ will be created in the same directory as the application.
+- When the application is started with a `headless` parameter entire addon and Wago upgrade process plus WTF backup should be executed in the background. Log file _CurseBreaker.html_ will be created in the same directory as the application.
 
 ## SUPPORTED URL
 - CurseForge: `https://www.curseforge.com/wow/addons/[addon_name]`, `cf:[addon_name]`
@@ -39,8 +39,8 @@ By default **CurseBreaker** will create backups of entire `WTF` directory.
 ## WEAKAURAS SUPPORT
 **CurseBreaker** by default will try to update all detected WeakAuras and Plater profiles/scripts. Process work the same as WeakAuras Companion.\
 All updates will still need to be applied in-game in the WeakAuras/Plater option menu.\
-Command `toggle_wa` can be used to set a single author name that will be ignored during the update.\
-Additionally Wago API key can be set with `set_wa_api` command so non-public entries will also be upgradeable.
+Command `toggle wago` can be used to set a single author name that will be ignored during the update.\
+Additionally Wago API key can be set with `set wa_api` command so non-public entries will also be upgradeable.
 
 ## KNOWN ISSUES
 - Using "double" WoWInterface projects ([example](https://www.wowinterface.com/downloads/info5086-BigWigsBossmods)) will always install a retail version of the addon. It can't be fixed as WoWInterface API doesn't support this type of project.
