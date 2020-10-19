@@ -5,8 +5,6 @@ pushd "${SCRIPT_HERE}" > /dev/null
     SCRIPT_HERE=$(pwd -P)
 popd > /dev/null
 
-echo "SCRIPT_HERE: ${SCRIPT_HERE}"
-
 pushd "/cygdrive/c/Program Files (x86)/World of Warcraft/_retail_"
 git fetch origin
 [[ $? -ne 0 ]] && echo "ERROR with 'git fetch origin', exiting..." && exit 1
@@ -26,3 +24,6 @@ if [[ $mergedOkay -eq 0 ]]; then
     git add -A WTF Interface
     git commit -m "CurseBreaker update" -- Interface WTF
 fi
+
+echo "Finished: $(pwd -P)"
+popd > /dev/null
