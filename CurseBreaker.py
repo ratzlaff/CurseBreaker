@@ -30,7 +30,7 @@ from prompt_toolkit.completion import WordCompleter, NestedCompleter
 from distutils.version import StrictVersion
 from CB import HEADERS, HEADLESS_TERMINAL_THEME, __version__
 from CB.Core import Core, DependenciesParser
-from CB.Compat import pause, timeout, clear, set_terminal_title, set_terminal_size, getch, kbhit
+from CB.Compat import pause, timeout, clear, set_terminal_title, set_terminal_size, KBHit
 from CB.Wago import WagoUpdater
 
 if platform.system() == 'Windows':
@@ -49,8 +49,7 @@ class TUI:
         self.headless = False
         self.console = None
         self.table = None
-        self.cfSlugs = None
-        self.wowiSlugs = None
+        self.slugs = None
         self.tipsDatabase = None
         self.completer = None
         self.os = platform.system()
@@ -130,16 +129,18 @@ class TUI:
             if not self.headless:
                 self.console.print('Automatic update of all addons will start in 5 seconds.\n'
                                    'Press any button to enter interactive mode.', highlight=False)
+            kb = KBHit()
             starttime = time.time()
             keypress = None
             while True:
                 if self.headless:
                     break
-                elif kbhit():
-                    keypress = getch()
+                elif kb.kbhit():
+                    keypress = kb.getch()
                     break
                 elif time.time() - starttime > 5:
                     break
+            kb.set_normal_term()
             if not keypress:
                 if not self.headless:
                     self.print_header()
@@ -284,32 +285,25 @@ class TUI:
             if platform.system() == 'Windows':
                 windll.kernel32.SetConsoleScreenBufferSize(windll.kernel32.GetStdHandle(-11), wintypes._COORD(100, 200))
             self.console = Console(width=97)
-        elif self.os == 'Darwin':
-            set_terminal_size(100, 50)
-            self.console = Console()
         else:
             self.console = Console()
 
     def setup_completer(self):
-        if not self.cfSlugs or not self.wowiSlugs:
+        if not self.slugs:
             # noinspection PyBroadException
             try:
-                self.cfSlugs = pickle.load(gzip.open(io.BytesIO(
-                    requests.get('https://storage.googleapis.com/cursebreaker/cfslugs.pickle.gz',
-                                 headers=HEADERS, timeout=5).content)))
-                self.wowiSlugs = pickle.load(gzip.open(io.BytesIO(
-                    requests.get('https://storage.googleapis.com/cursebreaker/wowislugs.pickle.gz',
+                self.slugs = pickle.load(gzip.open(io.BytesIO(
+                    requests.get('https://storage.googleapis.com/cursebreaker/slugs.pickle.gz',
                                  headers=HEADERS, timeout=5).content)))
             except Exception:
-                self.cfSlugs = []
-                self.wowiSlugs = []
+                self.slugs = {'cf': [], 'wowi': [], 'tukui': []}
         addons = []
         for addon in sorted(self.core.config['Addons'], key=lambda k: k['Name'].lower()):
             addons.append(addon['Name'])
         slugs = ['ElvUI', 'Tukui']
-        for item in self.cfSlugs:
+        for item in self.slugs['cf']:
             slugs.append(f'cf:{item}')
-        for item in self.wowiSlugs:
+        for item in self.slugs['wowi']:
             slugs.append(f'wowi:{item}')
         slugs.extend(['ElvUI:Dev', 'Shadow&Light:Dev'])
         accounts = []
@@ -336,6 +330,7 @@ class TUI:
                        'wago': None},
             'set': {'wago_api': None,
                     'wago_wow_account': WordCompleter(accounts, ignore_case=True, sentence=True)},
+            'show': {'dependencies': None},
             'uri_integration': None,
             'help': None,
             'exit': None
@@ -355,7 +350,7 @@ class TUI:
                 args = args.replace(addon['Name'], '', 1)
         return sorted(parsed)
 
-    def parse_link(self, text, link, dev=None, authors=None):
+    def parse_link(self, text, link, dev=None, authors=None, uiversion=None):
         if dev == 1:
             dev = ' [bold][B][/bold]'
         elif dev == 2:
@@ -367,10 +362,14 @@ class TUI:
             authors = f' [bold black]by {", ".join(authors)}[/bold black]'
         else:
             authors = ''
-        if link:
-            obj = Text.from_markup(f'[link={link}]{text}[/link]{dev}{authors}')
+        if uiversion and uiversion not in [self.core.currentRetailVersion, self.core.currentClassicVersion]:
+            uiversion = ' [bold yellow][!][bold yellow]'
         else:
-            obj = Text.from_markup(f'{text}{dev}{authors}')
+            uiversion = ''
+        if link:
+            obj = Text.from_markup(f'[link={link}]{text}[/link]{dev}{authors}{uiversion}')
+        else:
+            obj = Text.from_markup(f'{text}{dev}{authors}{uiversion}')
         obj.no_wrap = True
         return obj
 
@@ -466,9 +465,9 @@ class TUI:
             while not progress.finished:
                 for addon in addons:
                     try:
-                        name, authors, versionnew, versionold, modified, blocked, source, sourceurl, changelog, deps,\
-                            dstate = self.core.update_addon(addon if isinstance(addon, str) else addon['URL'],
-                                                            update, force)
+                        name, authors, versionnew, versionold, uiversion, modified, blocked, source, sourceurl,\
+                            changelog, deps, dstate = self.core.update_addon(
+                                addon if isinstance(addon, str) else addon['URL'], update, force)
                         dependencies.add_dependency(deps)
                         if provider:
                             source = f' [bold white]{source}[/bold white]'
@@ -479,21 +478,24 @@ class TUI:
                                 if modified:
                                     self.table.add_row(f'[bold red]Modified[/bold red]{source}',
                                                        self.parse_link(name, sourceurl, authors=authors),
-                                                       self.parse_link(versionold, changelog, dstate))
+                                                       self.parse_link(versionold, changelog, dstate,
+                                                                       uiversion=uiversion))
                                 else:
                                     if self.core.config['CompactMode'] and compacted > -1:
                                         compacted += 1
                                     else:
                                         self.table.add_row(f'[green]Up-to-date[/green]{source}',
                                                            self.parse_link(name, sourceurl, authors=authors),
-                                                           self.parse_link(versionold, changelog, dstate))
+                                                           self.parse_link(versionold, changelog, dstate,
+                                                                           uiversion=uiversion))
                             else:
                                 if modified or blocked:
                                     self.table.add_row(f'[bold red]Update suppressed[/bold red]{source}',
                                                        self.parse_link(name, sourceurl, authors=authors),
-                                                       self.parse_link(versionold, changelog, dstate))
+                                                       self.parse_link(versionold, changelog, dstate,
+                                                                       uiversion=uiversion))
                                 else:
-                                    version = self.parse_link(versionnew, changelog, dstate)
+                                    version = self.parse_link(versionnew, changelog, dstate, uiversion=uiversion)
                                     version.stylize('yellow')
                                     self.table.add_row(
                                         f'[yellow]{"Updated" if update else "Update available"}[/yellow]{source}',
@@ -665,6 +667,20 @@ class TUI:
         else:
             self.console.print('Unknown option.')
 
+    def c_show(self, args):
+        args = args.strip()
+        if args.startswith('dependencies'):
+            addons = sorted(list(filter(lambda k: k['URL'].startswith('https://www.curseforge.com/wow/addons/'),
+                                        self.core.config['Addons'])), key=lambda k: k['Name'].lower())
+            self.core.bulk_check(addons)
+            for addon in addons:
+                dependencies = DependenciesParser(self.core)
+                name, _, _, _, _, _, _, _, _, _, deps, _ = self.core.update_addon(addon['URL'], False, False)
+                dependencies.add_dependency(deps)
+                deps = dependencies.parse_dependency(output=True)
+                if len(deps) > 0:
+                    self.console.print(f'[green]{name}[/green]\n{", ".join(deps)}')
+
     def c_wago_update(self, _, verbose=True):
         if os.path.isdir(Path('Interface/AddOns/WeakAuras')) or os.path.isdir(Path('Interface/AddOns/Plater')):
             accounts = self.core.detect_accounts()
@@ -819,8 +835,9 @@ class TUI:
                            ' [link=https://wago.io/account]https://wago.io/account[/link]\n'
                            '[green]set wago_wow_account [Account name][/green]\n\tSets WoW account used by Wago updater'
                            '.\n\tNeeded only if compatibile addons are used on more than one WoW account.\n'
-                           '[green]uri_integration[/green]\n\tEnables integration with CurseForge page.\n\t[i]"Install"'
-                           '[/i] button will now start this application.\n'
+                           '[green]show dependencies[/green]\n\tDisplay a list of dependencies of all installed addons.'
+                           '\n[green]uri_integration[/green]\n\tEnables integration with CurseForge page.\n\t[i]"Instal'
+                           'l"[/i] button will now start this application.\n'
                            '\n[bold green]Supported URL:[/bold green]\n\thttps://www.curseforge.com/wow/addons/\[addon_'
                            'name] [bold white]|[/bold white] cf:\[addon_name]\n\thttps://www.wowinterface.com/downloads'
                            '/\[addon_name] [bold white]|[/bold white] wowi:\[addon_id]\n\thttps://www.tukui.org/addons.'

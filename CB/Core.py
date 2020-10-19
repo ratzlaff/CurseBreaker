@@ -35,10 +35,11 @@ class Core:
         self.cachePath = Path('WTF/CurseBreaker.cache')
         self.clientType = 'wow_retail'
         self.wagoCompanionVersion = 1110
+        self.currentRetailVersion = '9.0.1'
+        self.currentClassicVersion = '1.13.5'
         self.config = None
         self.cfIDs = None
-        self.cfDirs = None
-        self.cfDirsCompact = None
+        self.dirIndex = None
         self.blocklist = None
         self.cfCache = {}
         self.wowiCache = {}
@@ -314,9 +315,9 @@ class Core:
             if force:
                 modified = False
                 blocked = False
-            return new.name, new.author, new.currentVersion, oldversion, modified, blocked, source, sourceurl,\
-                new.changelogUrl, new.dependencies, dev
-        return url, [], False, False, False, False, '?', None, None, None, None
+            return new.name, new.author, new.currentVersion, oldversion, new.uiVersion, modified, blocked, source, \
+                sourceurl, new.changelogUrl, new.dependencies, dev
+        return url, [], False, False, None, False, False, '?', None, None, None, None
 
     def check_checksum(self, addon, bulk=True):
         checksums = {}
@@ -555,12 +556,9 @@ class Core:
             return []
 
     def detect_addons(self):
-        if not self.cfDirs or not self.cfDirsCompact:
-            self.cfDirs = pickle.load(gzip.open(io.BytesIO(
-                requests.get(f'https://storage.googleapis.com/cursebreaker/cfdir{self.clientType}.pickle.gz',
-                             headers=HEADERS, timeout=5).content)))
-            self.cfDirsCompact = pickle.load(gzip.open(io.BytesIO(
-                requests.get(f'https://storage.googleapis.com/cursebreaker/cfdircompact{self.clientType}.pickle.gz',
+        if not self.dirIndex:
+            self.dirIndex = pickle.load(gzip.open(io.BytesIO(
+                requests.get(f'https://storage.googleapis.com/cursebreaker/dir_{self.clientType}.pickle.gz',
                              headers=HEADERS, timeout=5).content)))
         addon_dirs = os.listdir(self.path)
         ignored = ['ElvUI_OptionsUI', 'Tukui_Config', '+Wowhead_Looter', 'WeakAurasCompanion', 'SharedMedia_MyMedia',
@@ -571,13 +569,13 @@ class Core:
         for directory in addon_dirs:
             if os.path.isdir(self.path / directory) and not os.path.islink(self.path / directory) and \
                     not os.path.isdir(self.path / directory / '.git') and not directory.startswith('Blizzard_'):
-                if directory in self.cfDirs:
-                    if len(self.cfDirs[directory]) > 1:
-                        partial_hit.append(self.cfDirs[directory])
+                if directory in self.dirIndex['single']['cf']:
+                    if len(self.dirIndex['single']['cf'][directory]) > 1:
+                        partial_hit.append(self.dirIndex['single']['cf'][directory])
                     elif not self.check_if_installed(f'https://www.curseforge.com/wow/addons/'
-                                                     f'{self.cfDirs[directory][0]}'):
+                                                     f'{self.dirIndex["single"]["cf"][directory][0]}'):
                         if not (directory == 'ElvUI_SLE' and self.check_if_installed('Shadow&Light:Dev')):
-                            hit.append(f'cf:{self.cfDirs[directory][0]}')
+                            hit.append(f'cf:{self.dirIndex["single"]["cf"][directory][0]}')
                 else:
                     if directory == 'ElvUI' or directory == 'Tukui':
                         if not self.check_if_installed(directory):
@@ -601,8 +599,8 @@ class Core:
         for partial in partial_hit:
             partial_hit_temp = {}
             for addon in partial:
-                if addon in self.cfDirsCompact:
-                    directories = self.cfDirsCompact[addon]
+                if addon in self.dirIndex['full']['cf']:
+                    directories = self.dirIndex['full']['cf'][addon]
                     complete = True
                 else:
                     directories = []
@@ -622,8 +620,8 @@ class Core:
                 partial_hit_parsed.append(partial_hit_parsed_temp)
             else:
                 for addon in partial:
-                    if addon in self.cfDirsCompact:
-                        directories = self.cfDirsCompact[addon]
+                    if addon in self.dirIndex['full']['cf']:
+                        directories = self.dirIndex['full']['cf'][addon]
                         for directory in directories:
                             if os.path.isdir(self.path / directory):
                                 miss.append(directory)
@@ -674,7 +672,7 @@ class DependenciesParser:
         if dependency:
             self.dependencies = self.dependencies + dependency
 
-    def parse_dependency(self):
+    def parse_dependency(self, output=False):
         self.dependencies = list(set(self.dependencies))
         for ignore in self.ignore:
             if ignore in self.dependencies:
@@ -685,10 +683,19 @@ class DependenciesParser:
             slug = self.core.parse_cf_id(d, reverse=True)
             if slug:
                 slugs.append(f'https://www.curseforge.com/wow/addons/{slug}')
-        for s in slugs:
-            if not self.core.check_if_installed(s):
-                processed.append(s)
-        if len(processed) > 0:
-            return ','.join(processed)
+        if output:
+            for s in slugs:
+                installed = self.core.check_if_installed(s)
+                if installed:
+                    processed.append(installed['Name'])
+                else:
+                    processed.append(f'cf:{s}')
+            return sorted(processed)
         else:
-            return None
+            for s in slugs:
+                if not self.core.check_if_installed(s):
+                    processed.append(s)
+            if len(processed) > 0:
+                return ','.join(processed)
+            else:
+                return None
