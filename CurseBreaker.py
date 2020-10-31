@@ -237,10 +237,11 @@ class TUI:
                 sys.exit(1)
 
     def motd_parser(self):
-        payload = requests.get('https://storage.googleapis.com/cursebreaker/motd', headers=HEADERS, timeout=5)
-        if payload.status_code == 200:
-            self.console.print(Panel(payload.content.decode('UTF-8'), title='MOTD', border_style='red'))
-            self.console.print('')
+        pass
+#        payload = requests.get('https://storage.googleapis.com/cursebreaker/motd', headers=HEADERS, timeout=5)
+#        if payload.status_code == 200:
+#            self.console.print(Panel(payload.content.decode('UTF-8'), title='MOTD', border_style='red'))
+#            self.console.print('')
 
     def handle_exception(self, e, table=True):
         if self.table.row_count > 1 and table:
@@ -496,7 +497,7 @@ class TUI:
                                                                        uiversion=uiversion))
                                 else:
                                     version = self.parse_link(versionnew, changelog, dstate, uiversion=uiversion)
-                                    version.stylize('yellow')
+                                    #version.stylize('yellow', end = '', style = '')
                                     self.table.add_row(
                                         f'[yellow]{"Updated" if update else "Update available"}[/yellow]{source}',
                                         self.parse_link(name, sourceurl, authors=authors),
